@@ -1,0 +1,840 @@
+"""
+*********************************************************************
+  FILE: assembler.py
+
+  AUTHOR: Judson Martin
+
+  DESCRIPTION: A SIC and SIC-XE assembler
+*********************************************************************
+"""
+
+# sasm [-S] [-l] <asmfile> <objfile>
+
+#!/usr/bin/python
+
+# -*- python -*-
+import sys
+import re
+
+Directs = ('start', 'end', 'byte', 'word', 'resb', 'resw', 'base',
+           'nobase')
+
+Regs = {'a':0,
+        'x':1,
+        'l':2,
+        'b':3,
+        's':4,
+        't':5,
+        'f':6,
+        'pc':8,
+        'sw':9
+        }
+
+Opcodes = {'add':(0x18, '3/4', 'SIC'),
+           'addf':(0x58, '3/4', 'XE'),
+           'addr':(0x90, '2', 'XE'),
+           'and':(0x40, '3/4', 'SIC'),
+           'clear':(0xB4, '2', 'XE'),
+           'comp':(0x28, '3/4', 'SIC'),
+           'compf':(0x88, '3/4', 'XE'),
+           'compr':(0xA0, '2', 'XE'),
+           'div':(0x24, '3/4', 'SIC'),
+           'divf':(0x64, '3/4', 'XE'),
+           'divr':(0x9C, '2', 'XE'),
+           'fix':(0xC4, '1', 'XE'),
+           'float':(0xC0, '1', 'XE'),
+           'hio':(0xF4, '1', 'XE'),
+           'j':(0x3C, '3/4', 'SIC'),
+           'jeq':(0x30, '3/4', 'SIC'),
+           'jgt':(0x34, '3/4', 'SIC'),
+           'jlt':(0x38, '3/4', 'SIC'),
+           'jsub':(0x48, '3/4', 'SIC'),
+           'lda':(0x00, '3/4', 'SIC'),
+           'ldb':(0x68, '3/4', 'XE'),
+           'ldch':(0x50, '3/4', 'SIC'),
+           'ldf':(0x70, '3/4', 'XE'),
+           'ldl':(0x08, '3/4', 'SIC'),
+           'lds':(0x6C, '3/4', 'XE'),
+           'ldt':(0x74, '3/4', 'XE'),
+           'ldx':(0x04, '3/4', 'SIC'),
+           'lps':(0xD0, '3/4', 'XE'),
+           'mul':(0x20, '3/4', 'SIC'),
+           'mulf':(0x60, '3/4', 'XE'),
+           'mulr':(0x98, '2', 'XE'),
+           'norm':(0xC8, '1', 'XE'),
+           'or':(0x44, '3/4', 'SIC'),
+           'rd':(0xD8, '3/4', 'SIC'),
+           'rmo':(0xAC, '2', 'XE'),
+           'rsub':(0x4C, '3/4', 'SIC'),
+           'shiftl':(0xA4, '2', 'XE'),
+           'shiftr':(0xA8, '2', 'XE'),
+           'sio':(0xF0, '1', 'XE'),
+           'ssk':(0xEC, '3/4', 'XE'),
+           'sta':(0x0C, '3/4', 'SIC'),
+           'stb':(0x78, '3/4', 'XE'),
+           'stch':(0x54, '3/4', 'SIC'),
+           'stf':(0x80, '3/4', 'XE'),
+           'sti':(0xD4, '3/4', 'XE'),
+           'stl':(0x14, '3/4', 'SIC'),
+           'sts':(0x7C, '3/4', 'XE'),
+           'stsw':(0xE8, '3/4', 'SIC'),
+           'stt':(0x84, '3/4', 'XE'),
+           'stx':(0x10, '3/4', 'SIC'),
+           'sub':(0x1C, '3/4', 'SIC'),
+           'subf':(0x5C, '3/4', 'XE'),
+           'subr':(0x94, '2', 'XE'),
+           'svc':(0xB0, '2', 'XE'),
+           'td':(0xE0, '3/4', 'SIC'),
+           'tio':(0xF8, '1', 'XE'),
+           'tix':(0x2C, '3/4', 'SIC'),
+           'tixr':(0xB8, '2', 'XE'),
+           'wd':(0xDC, '3/4', 'SIC')
+           }
+
+FirstLine = 1
+LineNum = 1
+Symbols = {}
+LineList = []
+ParseLines = {}
+AddrList = {}
+CurrentAddr = 0
+StartAddr = 0       #StartAddr: address specified by END directive
+FoundStart = False
+FoundEnd = False
+LineProps = {}
+Based = False
+FoundError = False
+Title = ''
+BasedVal = 0
+CodeList = []
+StartStart = 0
+
+def handleDirect(wordList):
+
+    global FoundError
+    global CurrentAddr
+    global Based
+    global FoundStart
+    global FoundEnd
+    global StartStart
+    AddrList[LineNum] = CurrentAddr
+
+    if 'start' != wordList[0]:
+        if len(wordList) < 2:
+            print 'Line:', LineNum, ':: Directive "', wordList[0], '" needs an operand.'
+            FoundError = True
+            return True
+        else:
+            while len(wordList) != 2:
+                wordList.pop()
+
+    if 'start' == wordList[0]:
+        if LineNum != FirstLine:
+            print 'Line:', LineNum, ':: Cannot instructions or directives before " start " directive.'
+            FoundError = True
+            return True
+        if FoundStart:
+            print 'Line:', LineNum, ':: Cannot have multiple " start " directives.'
+            FoundError = True
+            return True
+        FoundStart = True
+        if len(wordList) != 1:
+            CurrentAddr = int(wordList[1], 16)
+            StartStart = CurrentAddr
+            while len(wordList) != 2:
+                wordList.pop()
+    elif 'end' == wordList[0]:
+        if wordList[1] in Symbols.keys():
+            global StartAddr
+            StartAddr = Symbols[wordList[1]]
+        else:
+            if not wordList[1].isdigit():
+                print 'Line:', LineNum, ':: "', wordList[1], '" is not a valid label or hexadecimal number.'
+                FoundError = True
+                return False
+            StartAddr = int(wordList[1], 16)
+        FoundEnd = True
+        return False
+    elif 'byte' == wordList[0]:
+        original = wordList[1]
+        if wordList[1][0] == 'c':
+            if (wordList[1][1] == "'") and (wordList[1][-1] == "'"):
+                wordList[1] = wordList[1].strip('c')
+                wordList[1] = wordList[1].strip("'")
+                CurrentAddr += len(wordList[1])
+                wordList[1] = 'c'+wordList[1]
+            else:
+                print 'Line:', LineNum, ':: "', original, '" is not a valid operand.'
+                FoundError = True
+        elif wordList[1][0] == 'x':
+            if (wordList[1][1] == "'") and (wordList[1][-1] == "'"):
+                wordList[1] = wordList[1].strip('x')
+                wordList[1] = wordList[1].strip("'")
+                if len(wordList[1]) % 2 != 0:
+                    print 'Line:', LineNum, ':: "', original, '" is not a valid operand.'
+                    FoundError = True
+                else:
+                    for char in wordList[1]:
+                        if not char in 'abcdef0123456789':
+                            print 'Line:', LineNum, ':: "', original, '" is not a valid operand.'
+                            FoundError = True
+                            break
+                CurrentAddr += len(wordList[1])/2
+                wordList[1] = 'x'+wordList[1]
+            else:
+                print 'Line:', LineNum, ':: "', original, '" is not a valid operand.'
+                FoundError = True
+        else:
+            print 'Line:', LineNum, ':: "', original, '" is not a valid operand.'
+            FoundError = True
+        
+    elif 'word' == wordList[0]:
+        if not wordList[1].isdigit():
+            print 'Line:', LineNum, ':: "', wordList[1], '" is not a valid operand.'
+            FoundError = True
+        CurrentAddr += 3
+    elif 'resb' == wordList[0]:
+        if not wordList[1].isdigit():
+            print 'Line:', LineNum, ':: "', wordList[1], '" is not a valid operand.'
+            FoundError = True
+            return True
+        CurrentAddr += int(wordList[1])
+    elif 'resw' == wordList[0]:
+        if not wordList[1].isdigit():
+            print 'Line:', LineNum, ':: "', wordList[1], '" is not a valid operand.'
+            FoundError = True
+            return True
+        CurrentAddr += 3 * int(wordList[1])
+    elif 'base' == wordList[0]:
+        Based = True
+    elif 'nobase' == wordList[0]:
+        Based = False
+
+    return True
+
+def handleInstr(wordList, extend):
+
+    global FoundError
+    global CurrentAddr
+    AddrList[LineNum] = CurrentAddr
+    params = Opcodes[wordList[0]]
+
+    if '1' == params[1]:
+        CurrentAddr += 1
+        LineProps[LineNum] = []
+        while len(wordList) != 1:
+            wordList.pop()
+    elif '2' == params[1]:
+        CurrentAddr += 2
+        if (len(wordList) < 3) and ((wordList[0] != 'clear') and
+                                    (wordList[0] != 'tixr')):
+            print 'Line:', LineNum, ':: Mnemonic "', wordList[0], '" requires two register operands.'
+            FoundError = True
+            return
+        wordList[1] = wordList[1].strip(',')
+        LineProps[LineNum] = []
+        if (wordList[0] != 'clear') and (wordList[0] != 'tixr'):
+            while len(wordList) != 3:
+                wordList.pop()
+        else:
+            while len(wordList) != 2:
+                wordList.pop()
+    elif '3/4' == params[1]:
+        properties = []
+        CurrentAddr += 3
+        if extend:
+            CurrentAddr += 1
+            properties.append('e')
+        if Based:
+            properties.append('b')
+        if wordList[0] == 'rsub':
+            while (len(wordList) != 1):
+                wordList.pop()
+            LineProps[LineNum] = properties
+            return
+        if len(wordList) == 1:
+            print 'Line:', LineNum, ':: Mnemonic "', wordList[0], '" requires an operand.'
+            FoundError = True
+            LineProps[LineNum] = properties
+            return
+        operand = wordList[1]
+        if operand[0] == '@':
+            properties.append('n')
+            wordList[1] = operand[1:]
+        elif operand[0] == '#':
+            properties.append('i')
+            wordList[1] = operand[1:]
+        if operand[-1] == ',':
+            if len(wordList) >= 3:
+                if wordList[2] == 'x':
+                    properties.append('x')
+                else:
+                    print 'Line:', LineNum, ':: "', wordList[2], '" is not valid here.'
+                    FoundError = True
+            else:
+                print 'Line:', LineNum, ':: "', operand[:-1], '" should not have a comma.'
+                FoundError = True
+            wordList[1] = operand[:-1]
+        while len(wordList) != 2:
+            wordList.pop()
+        LineProps[LineNum] = properties
+
+    return
+
+def handleLine(wordList):
+
+    global FoundError
+
+    extended = False
+    word = wordList[0]
+    if '+' == word[0]:
+        word = word[1:]
+        extended = True
+        wordList[0] = word
+
+    for word in Directs:
+        if word == wordList[0]:
+            LineProps[LineNum] = []
+            return handleDirect(wordList)
+    
+    for word in Opcodes:
+        if word == wordList[0]:
+            handleInstr(wordList, extended)
+            return True
+
+    print 'Line:', LineNum, '::', wordList[0], 'is not a valid directive or mnemonic.'
+    FoundError = True
+
+    return True
+
+def assembleXE():
+
+    commentExp = re.compile('^(\s*\.)|(\s*\n)')
+    labelExp = re.compile('^\s+')
+    readALine = False
+    global FirstLine
+    global FoundError
+    global LineNum
+
+    for line in LineList:
+        labelStr = ''
+        line = line.lower()
+        if commentExp.match(line):
+            pass
+        else:
+            if not readALine:
+                FirstLine = LineNum
+                readALine = True
+            brokeLine = line.split()
+            if not labelExp.match(line):
+                labelStr = brokeLine.pop(0)
+                if len(brokeLine) == 0:
+                    print 'Line:', LineNum, ':: "', labelStr, '" is an undefined label.'
+                    FoundError = True
+                elif labelStr in Symbols.keys():
+                    print 'Line:', LineNum, ':: "', labelStr, '" is a duplicate label.'
+                    FoundError = True
+                elif not labelStr.isalnum():
+                    print 'Line:', LineNum, ':: "', labelStr, '" is an illegal label - must be only alphanumeric characters.'
+                    FoundError = True
+                else:
+                    if brokeLine[0] == 'start':
+                        global Title
+                        Title = labelStr
+                    Symbols[labelStr] = CurrentAddr
+
+            if (len(brokeLine) > 2) and (brokeLine[2] == ','):
+                brokeLine.remove(',')
+                brokeLine[1] = brokeLine[1]+','
+            if (len(brokeLine) > 2) and (brokeLine[2][0] == ','):
+                brokeLine[2] = brokeLine[2][1:]
+                brokeLine[1] = brokeLine[1]+','
+
+            if (len(brokeLine) >= 2) and (brokeLine[1][-1] != ','):
+                twoVals = brokeLine[1].split(',')
+                if len(twoVals) == 2:
+                    valOne = twoVals[0].split()
+                    valTwo = twoVals[1].split()
+                    brokeLine.insert(1, valOne[0]+',')
+                    brokeLine.insert(2, valTwo[0])
+
+            if len(brokeLine) != 0:
+                if handleLine(brokeLine):
+                    ParseLines[LineNum] = brokeLine
+                else:
+                    ParseLines[LineNum] = brokeLine
+                    break
+
+        LineNum += 1
+
+    return
+
+
+#END OF PASS ONE - START OF PASS TWO
+################################################################################
+
+#    Symbols = hash table of labels and their locations
+#    ParseLines = list of lists containing each instruction or directive
+#    AddrList = list containing offset of each line
+#    StartAddr = address specified by END directive
+#    Title = the Title of the program
+#    CodeList = list containing binary code (in ascii) for each instruction
+#    BasedVal = initialized to 0, but used to keep track of current base
+
+def incLine():
+
+    global LineNum
+    found = False
+    LineNum += 1
+
+    while not found:
+        if LineNum in ParseLines.keys():
+            return
+        LineNum += 1
+        
+    return
+
+
+def encodeInstr(instr):
+
+    params = Opcodes[instr[0]]
+    global FoundError
+    global CurrentAddr
+
+    if params[1] == '1':
+        CodeList.append(chr(params[0]))
+        CurrentAddr += 1
+    elif params[1] == '2':
+        CodeList.append(chr(params[0]))
+        CurrentAddr += 2
+        if instr[0] == 'svc':
+            if not (instr[1].isdigit() and instr[1] < 16):
+                print 'Line:', LineNum, ':: Operand "', instr[1], '" is not a valid number 0-15.'
+                FoundError = True
+                return
+            value = int(instr[1])
+            value = value << 4
+            CodeList.append(chr(value))
+        elif (instr[0] == 'clear') or (instr[0] == 'tixr'):
+            if not instr[1] in Regs.keys():
+                print 'Line:', LineNum, ':: Operand "', instr[1], '" is not a valid register.'
+                FoundError = True
+                return
+            value = Regs[instr[1]]
+            value = value << 4
+            CodeList.append(chr(value))
+        elif (instr[0] == 'shiftl') or (instr[0] == 'shiftr'):
+            if not instr[1] in Regs.keys():
+                print 'Line:', LineNum, ':: Operand "', instr[1], '" is not a valid register.'
+                FoundError = True
+                return
+            if not (instr[1].isdigit() and instr[1] < 16):
+                print 'Line:', LineNum, ':: Operand "', instr[1], '" is not a valid number 0-15.'
+                FoundError = True
+                return
+            value = Regs[instr[1]]
+            value = value << 4
+            value += Regs[instr[2]]
+            CodeList.append(chr(value))
+        else:
+            if not instr[1] in Regs.keys():
+                print 'Line:', LineNum, ':: Operand "', instr[1], '" is not a valid register.'
+                FoundError = True
+                return
+            if not instr[2] in Regs.keys():
+                print 'Line:', LineNum, ':: Operand "', instr[2], '" is not a valid register.'
+                FoundError = True
+                return
+            reg1 = Regs[instr[1]]
+            reg2 = Regs[instr[2]]
+            newByte = reg1 << 4
+            newByte += reg2
+            CodeList.append(chr(newByte))
+    elif params[1] == '3/4':
+        CurrentAddr += 3
+        newByte = params[0]
+        properties = LineProps[LineNum]
+        if instr[0] == 'rsub':
+            newByte += 3
+            CodeList.append(chr(newByte))
+            CodeList.append(chr(0))
+            CodeList.append(chr(0))
+            return
+        pcRel = False
+        usingBased = False
+        if instr[1] in Symbols.keys():
+            value = Symbols[instr[1]]
+        elif instr[1].isdigit():
+            value = int(instr[1])
+        else:
+            FoundError = True
+            print 'Line:', LineNum, ':: Operand "', instr[1], '" is not  a valid label.'
+            FoundError = True
+            return
+        if ('n' not in properties) and (('i' not in properties) and
+                                        ('e' not in properties)):
+            newByte += 3
+            CodeList.append(chr(newByte))
+            if value > 0b111111111111:           #if direct wont work
+                pcAddr = AddrList[LineNum] + 3  #do pc-relative
+                disp = value - pcAddr
+                negative = False
+                if disp < 0:
+                    negative = True
+                    disp = disp * -1
+                if disp > 0b11111111111:        #if pc-relative wont work
+                    if ('b' in properties):        #do Based if possible
+                        disp = value - BasedVal
+                        if (disp >= 0) and (disp <= 0b111111111111):
+                            value = disp
+                            usingBased = True
+                        else:                   #if Based wont work
+                            if (value > 0b111111111111111): #see if SIC work
+                                CodeList.pop()
+                                print 'Line:', LineNum, ':: Instruction needs an extended address.'
+                                FoundError = True
+                                return
+                            CodeList.pop()          #do SIC
+                            newByte -= 3
+                            CodeList.append(chr(newByte))
+                    else:
+                        if (value > 0b111111111111111): #see if SIC will work
+                            CodeList.pop()
+                            print 'Line:', LineNum, ':: Instruction needs an extended address.'
+                            FoundError = True
+                            return
+                        CodeList.pop()          #do SIC
+                        newByte -= 3
+                        CodeList.append(chr(newByte))
+                else:                   #else pc-relative does work
+                    value = disp        #set displacement of value
+                    pcRel = True        #and set disp bit
+            highByte = value >> 8
+            if pcRel:
+                if negative:
+                    value -= 1
+                    valueStr = bin(value)[2:]
+                    valueStr.zfill(12)
+                    for char in valueStr:
+                        if char == '0':
+                            char = '1'
+                        else:
+                            char = '0'
+                    value = int(valueStr, 2)
+                    highByte = value >> 8
+                highByte += 32
+            elif usingBased:
+                highByte += 64
+            if 'x' in properties:
+                highByte += 128
+            lowByte = value & 0b0000000011111111
+            CodeList.append(chr(highByte))
+            CodeList.append(chr(lowByte))                
+        if 'n' in properties:
+            newByte += 2
+            CodeList.append(chr(newByte))
+            if 'e' in properties:
+                newByte = value >> 16
+                newByte += 16
+                CodeList.append(chr(newByte))
+            newByte = value & 0b000000001111111100000000
+            newByte = newByte >> 8
+            CodeList.append(chr(newByte))
+            newByte = value & 0b000000000000000011111111
+            CodeList.append(chr(newByte))
+        elif 'i' in properties:
+            newByte += 1
+            CodeList.append(chr(newByte))
+            if 'e' in properties:
+                newByte = value >> 16
+                newByte += 16
+                CodeList.append(chr(newByte))
+            newByte = value & 0b000000001111111100000000
+            newByte = newByte >> 8
+            CodeList.append(chr(newByte))
+            newByte = value & 0b000000000000000011111111
+            CodeList.append(chr(newByte))
+        elif 'e' in properties:
+            CurrentAddr += 1
+            newByte += 3
+            CodeList.append(chr(newByte))
+            if 'e' in properties:
+                newByte = value >> 16
+                CodeList.append(chr(newByte))
+            newByte = value & 0b000000001111111100000000
+            newByte = newByte >> 8
+            CodeList.append(chr(newByte))
+            newByte = value & 0b000000000000000011111111
+            CodeList.append(chr(newByte))
+
+    return
+
+def encodeDirect(directive):
+
+    global FoundError
+    global CurrentAddr
+
+    if directive[0] == 'start':
+        pass
+    elif directive[0] == 'end':
+        pass
+    elif directive[0] == 'byte':
+        string = directive[1][1:]
+        if directive[1][0] == 'c':
+            for char in string:
+                CodeList.append(chr(char))
+                CurrentAddr += 1
+        else:
+            while string != '':
+                num = string[0]
+                string = string[1:]
+                num = num + string[0]
+                string = string[1:]
+                number = int(num, 16)
+                CodeList.append(chr(number))
+    elif directive[0] == 'word':
+        CurrentAddr += 3
+        number = int(directive[1])
+        if number > 111111111111111111111111:
+            print 'Line:', LineNum, ':: Instruction needs an extended address.'
+            FoundError = True
+            return
+        currentByte = number & 0b111111110000000000000000
+        currentByte = currentByte >> 16
+        CodeList.append(chr(currentByte))
+        currentByte = number & 0b000000001111111100000000
+        currentByte = currentByte >> 8
+        CodeList.append(chr(currentByte))
+        currentByte = number & 0b000000000000000011111111
+        CodeList.append(chr(currentByte))
+    elif directive[0] == 'resb':
+        num = LineNum
+        num += 1
+        while not num in AddrList.keys():
+            num += 1
+        CodeList.append(str(AddrList[num]).zfill(10))
+        CurrentAddr = AddrList[num]
+    elif directive[0] == 'resw':
+        num = LineNum
+        num += 1
+        while not num in AddrList.keys():
+            num += 1
+        CodeList.append(str(AddrList[num]).zfill(10))
+        CurrentAddr = AddrList[num]        
+    elif directive[0] == 'base':
+        if directive[1] in Symbols.keys():
+            global BasedVal
+            BasedVal = Symbols[directive[1]]
+        else:
+            print 'Line:', LineNum, ':: Operand "', directive[1], '" is not  a valid label.'
+            FoundError = True
+    elif directive[0] == 'nobase':
+        pass
+
+    return
+
+def handleWordList(wordList):
+
+    for word in Directs:
+        if word == wordList[0]:
+            encodeDirect(wordList)
+            return
+
+    for word in Opcodes:
+        if word == wordList[0]:
+            encodeInstr(wordList)
+            return
+
+    return
+
+def generateCode():
+
+    global CurrentAddr
+    global LineNum
+    CurrentAddr = StartStart
+    LineNum = 0
+
+    incLine()
+    wordList = []
+    lines = len(ParseLines.keys())
+    lines -= 1
+
+    for num in range(lines):
+        wordList = ParseLines[LineNum]
+
+        handleWordList(wordList)
+
+        if num != (lines):
+            incLine()
+
+    return
+
+def writeHRecord(fileHandle):
+
+    fileHandle.write('H')
+    letWritten = 0
+    titlen = len(Title)
+
+    while (letWritten != 6) and (letWritten != titlen):
+        fileHandle.write(Title[letWritten])
+        letWritten += 1
+        
+    while letWritten != 6:
+        fileHandle.write(' ')
+        letWritten += 1
+
+    currentByte = StartStart & 0b111111110000000000000000
+    currentByte = currentByte >> 16
+    fileHandle.write(chr(currentByte))
+    currentByte = StartStart & 0b000000001111111100000000
+    currentByte = currentByte >> 8
+    fileHandle.write(chr(currentByte))
+    currentByte = StartStart & 0b000000000000000011111111
+    fileHandle.write(chr(currentByte))
+
+    size = CurrentAddr - StartStart
+
+    currentByte = size & 0b111111110000000000000000
+    currentByte = currentByte >> 16
+    fileHandle.write(chr(currentByte))
+    currentByte = size & 0b000000001111111100000000
+    currentByte = currentByte >> 8
+    fileHandle.write(chr(currentByte))
+    currentByte = size & 0b000000000000000011111111
+    fileHandle.write(chr(currentByte))
+
+    return
+
+def handleTRecords(fileHandle, index, address):
+
+    numBytes = 0
+    going = True
+
+    while going:
+        if (index < len(CodeList)) and (len(CodeList[index]) == 10):
+            address = int(CodeList[index])
+            index += 1
+        else:
+            break
+
+    while going:
+        if ((numBytes < 64) and (index < len(CodeList))) and (len(CodeList[index]) == 1):
+            numBytes += 1
+            index += 1
+        else:
+            break
+    
+    if numBytes == 0:
+        return len(CodeList), address
+
+    fileHandle.write('T')
+
+    currentByte = address & 0b111111110000000000000000
+    currentByte = currentByte >> 16
+    fileHandle.write(chr(currentByte))
+    currentByte = address & 0b000000001111111100000000
+    currentByte = currentByte >> 8
+    fileHandle.write(chr(currentByte))
+    currentByte = address & 0b000000000000000011111111
+    fileHandle.write(chr(currentByte))
+
+    fileHandle.write(chr(numBytes))
+
+    newVar = index - numBytes
+    while (newVar < index):
+        fileHandle.write(CodeList[newVar])
+        newVar += 1
+
+    return index, address + numBytes
+
+def writeERecord(fileHandle):
+
+    fileHandle.write('E')
+
+    currentByte = StartAddr & 0b111111110000000000000000
+    currentByte = currentByte >> 16
+    fileHandle.write(chr(currentByte))
+    currentByte = StartAddr & 0b000000001111111100000000
+    currentByte = currentByte >> 8
+    fileHandle.write(chr(currentByte))
+    currentByte = StartAddr & 0b000000000000000011111111
+    fileHandle.write(chr(currentByte))
+
+    return
+
+def passTwo(fileHandle):
+
+    writeHRecord(fileHandle)
+
+    address = StartStart
+    index = 0
+    while index != (len(CodeList)):
+        index, address = handleTRecords(fileHandle, index, address)
+
+    writeERecord(fileHandle)
+
+    return
+
+def main():
+
+    # parser = argparse.ArgumentParser(prog="sasm",
+    #                                  description=
+    #                                  "Assembles SIC and SIC-XE files")
+    # parser.add_argument("-S", action="store_true",
+    #                     help="Assemble a SIC file (default: SIC-XE)")
+    # parser.add_argument("-l", action="store_true",
+    #                     help="I'm not sure what this does yet")
+    # parser.add_argument("asmfile", help="File to be assembled")
+    # parser.add_argument("objfile", help="Name of object file outputted")
+
+    # args = parser.parse_args()
+    # handle = open(args.asmfile,'r')
+
+    if len(sys.argv) < 3:
+        print 'Program "sasm" requires two arguments:'
+        print 'sasm <asm_file_name> <obj_file_name>'
+        sys.exit(1)
+
+    asmFile = sys.argv[1]
+    objFile = sys.argv[2]
+
+    handle = open(asmFile, 'r')
+
+    currentLine = handle.readline()
+    while currentLine != '':
+        LineList.append(currentLine)
+        currentLine = handle.readline()
+
+    handle.close()
+
+    assembleXE()
+
+#    print ParseLines
+#    print AddrList
+#    print LineProps
+#    print Symbols
+#    print Title
+
+    generateCode()
+
+    if not FoundEnd:
+        print 'Error: " end " directive not found.'
+        sys.exit(1)
+
+    if FoundError:
+        print 'Please correct your errors before attempting to assemble again.'
+        sys.exit(1)
+
+    if objFile[-4:] != '.obj':
+        objFile = objFile + '.obj'
+
+    handle = open(objFile, 'w')
+
+    passTwo(handle)
+
+    handle.close()
+
+    sys.exit(1)
+
+if __name__ == "__main__":
+    main()
